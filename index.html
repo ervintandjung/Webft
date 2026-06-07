@@ -62,8 +62,11 @@
     slots int default 12,
     price int default 0,
     status text default 'open',
+    wa_link text,
     created_at timestamptz default now()
   );
+  -- Jalankan ini jika tabel tournaments sudah ada sebelumnya:
+  -- alter table public.tournaments add column if not exists wa_link text;
   alter table public.tournaments enable row level security;
   create policy "tournaments_select_all" on public.tournaments for select using (true);
   create policy "tournaments_admin_write" on public.tournaments for all
@@ -79,8 +82,11 @@
     players jsonb,
     payment_proof text,
     status text default 'pending',
+    registered_at_us bigint,
     created_at timestamptz default now()
   );
+  -- Jalankan jika tabel sudah ada:
+  -- alter table public.bookings add column if not exists registered_at_us bigint;
   alter table public.bookings enable row level security;
   create policy "bookings_select_self_or_admin" on public.bookings for select
     using (auth.uid()=user_id or (select is_admin from public.profiles where id=auth.uid())=true);
@@ -335,13 +341,15 @@ a{color:inherit;text-decoration:none;}
       <button class="btn btn-ghost btn-sm" onclick="gotoPage('home')" style="margin-bottom:14px;">← Kembali</button>
       <div class="card">
         <div style="font-family:var(--font);font-size:18px;font-weight:800;margin-bottom:4px;" id="book-tname"></div>
-        <div class="muted small" id="book-tmeta" style="margin-bottom:16px;"></div>
+        <div class="muted small" id="book-tmeta" style="margin-bottom:10px;"></div>
+        <div id="book-slot-info" style="margin-bottom:12px;"></div>
 
         <div class="field" style="margin-bottom:12px;">
           <label class="label">Nama Tim</label>
           <input class="input" id="book-team" placeholder="Contoh: BLACK SQUAD"/>
         </div>
-        <div id="book-players"></div>
+        <!-- player fields dihapus, daftar langsung tanpa isi ID -->
+        <div id="book-players" style="display:none;"></div>
 
         <!-- Pilih metode pembayaran -->
         <div class="field" style="margin-bottom:12px;">
@@ -415,6 +423,9 @@ a{color:inherit;text-decoration:none;}
           </div>
           <div class="field" style="margin-bottom:10px;"><label class="label">Hadiah</label>
             <input class="input" id="t-prize" placeholder="Contoh: Rp 200.000 + Diamond 500"/>
+          </div>
+          <div class="field" style="margin-bottom:10px;"><label class="label">🔗 Link Grup WA (dikirim otomatis setelah bayar)</label>
+            <input class="input" id="t-walink" placeholder="https://chat.whatsapp.com/xxxxx"/>
           </div>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-orange" onclick="saveTournament()">SIMPAN</button>
@@ -851,56 +862,151 @@ async function loadTournaments(){
 function escapeHtml(s){ return String(s||'').replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[c]); }
 
 /* ════════════════════════ BOOKING ════════════════════════ */
-function openBooking(t){
+/* ════ SLOT PRIORITY SYSTEM ════
+   Setiap klik DAFTAR dicatat timestamp microsecond (Date.now()*1000 + performance.now micro).
+   Slot <= kapasitas → langsung masuk (status pending_fast).
+   Slot penuh → masuk antrian booking (status booking), timer 10 menit.
+   Kalau QRIS timeout/tidak bayar → status expired, slot kembali available.
+*/
+function getMicroTimestamp(){
+  const ms = Date.now();
+  const sub = performance.now();
+  // ambil fractional microseconds dari performance.now
+  const micros = Math.round((sub % 1) * 1000);
+  return ms * 1000 + micros;
+}
+
+async function openBooking(t){
   activeTournament = t;
   $('book-tname').textContent = t.name;
   $('book-tmeta').textContent = `${t.tdate||''} ${t.ttime||''} · ${t.mode} · ${fmtRp(t.price)}`;
   $('book-team').value='';
   $('book-proof').value=''; $('book-proof-info').textContent='';
-  // dynamic player fields
-  const n = t.mode==='SOLO'?1: t.mode==='DUO'?2: 4;
-  let html=''; for(let i=1;i<=n;i++){
-    html += `<div class="field" style="margin-bottom:10px;"><label class="label">Player ${i} — IGN / UID</label><input class="input book-player" placeholder="IGN | UID"/></div>`;
-  }
-  $('book-players').innerHTML = html;
+  $('book-players').innerHTML = '';
   setErr('book-err','');
   // info pembayaran
   if(siteConfig.rekening?.info){
     $('book-tmeta').innerHTML += `<div style="margin-top:8px;padding:8px;background:var(--bg3);border-radius:6px;white-space:pre-line;color:var(--text);">💳 ${escapeHtml(siteConfig.rekening.info)}</div>`;
   }
+  // Cek slot tersisa
+  await checkAndShowSlotInfo(t);
   gotoPage('book');
+}
+
+async function checkAndShowSlotInfo(t){
+  try{
+    // Hitung booking yang sudah confirmed/approved/booking (belum expired)
+    const { data: bks } = await sb.from('bookings')
+      .select('id,status')
+      .eq('tournament_id', t.id)
+      .in('status', ['approved','booking','pending_fast']);
+    const taken = (bks||[]).length;
+    const remaining = (t.slots||0) - taken;
+    const slotInfo = document.getElementById('book-slot-info');
+    if(slotInfo){
+      if(remaining <= 0){
+        slotInfo.innerHTML = `<div style="color:var(--red);font-weight:700;padding:8px 12px;background:rgba(255,61,87,.1);border-radius:8px;">❌ Slot penuh! Turnamen ini sudah tidak bisa didaftarkan.</div>`;
+      } else if(remaining <= 3){
+        slotInfo.innerHTML = `<div style="color:var(--accent2);font-weight:700;padding:8px 12px;background:rgba(255,179,0,.1);border-radius:8px;">⚡ Sisa ${remaining} slot! Segera daftar sebelum penuh.</div>`;
+      } else {
+        slotInfo.innerHTML = `<div style="color:var(--green);font-size:13px;padding:6px 12px;background:rgba(0,230,118,.08);border-radius:8px;">✅ Sisa ${remaining} dari ${t.slots} slot tersedia.</div>`;
+      }
+    }
+  }catch(e){ console.warn(e); }
 }
 
 async function submitBooking(){
   setErr('book-err','');
   if(!activeTournament) return;
   const team=$('book-team').value.trim();
-  const players=[...document.querySelectorAll('.book-player')].map(i=>i.value.trim());
   if(!team) return setErr('book-err','Nama tim wajib.');
-  if(players.some(p=>!p)) return setErr('book-err','Semua slot player wajib diisi.');
-  const proofFile=$('book-proof').files[0];
-  if(!proofFile) return setErr('book-err','Upload bukti transfer.');
-  if(proofFile.size > 2*1024*1024) return setErr('book-err','Bukti max 2MB.');
 
-  const btn=$('book-submit-btn'); setLoading(btn,true,'Mengirim...');
+  // Rekam timestamp microsecond saat tombol ditekan
+  const registeredAtUs = getMicroTimestamp();
+
+  const btn=$('book-submit-btn'); setLoading(btn,true,'Mengecek slot...');
   try{
-    const blob = await compressImage(proofFile, 1024, 0.8);
-    const path = `proof/${currentUser.id}-${Date.now()}.webp`;
-    const {error: upErr} = await sb.storage.from('site-assets').upload(path, blob, { contentType:'image/webp', upsert:false });
-    if(upErr) throw upErr;
-    const {data: pub} = sb.storage.from('site-assets').getPublicUrl(path);
+    // Cek jumlah booking aktif (exclude expired)
+    const { data: activeBks, error: bkErr } = await sb.from('bookings')
+      .select('id,registered_at_us,status')
+      .eq('tournament_id', activeTournament.id)
+      .in('status', ['approved','booking','pending_fast']);
+    if(bkErr) throw bkErr;
 
-    const {error} = await sb.from('bookings').insert({
+    const totalSlots = activeTournament.slots || 12;
+    const taken = (activeBks||[]).length;
+    const remaining = totalSlots - taken;
+
+    if(remaining <= 0){
+      setErr('book-err','❌ Slot sudah penuh! Tidak bisa mendaftar.');
+      return;
+    }
+
+    // Tentukan status berdasarkan slot
+    // Kalau masih ada slot penuh → pending_fast (langsung masuk, prioritas timestamp)
+    // Kalau 0 slot tapi ada yang booking (belum bayar) → mereka punya tempat cadangan
+    const bookingStatus = 'booking'; // selalu booking dulu, QRIS yang konfirmasi
+
+    // Insert booking dengan timestamp microsecond
+    const { data: newBk, error: insErr } = await sb.from('bookings').insert({
       user_id: currentUser.id,
       tournament_id: activeTournament.id,
       team_name: team,
-      players,
-      payment_proof: pub.publicUrl,
-      status: 'pending'
-    });
-    if(error) throw error;
-    toast('Booking terkirim, menunggu konfirmasi admin');
-    gotoPage('mybook');
+      players: [],
+      payment_proof: null,
+      status: bookingStatus,
+      registered_at_us: registeredAtUs
+    }).select().single();
+    if(insErr) throw insErr;
+
+    // Setelah insert, cek posisi ranking berdasarkan timestamp microsecond
+    const { data: allBks } = await sb.from('bookings')
+      .select('id,registered_at_us,status,user_id')
+      .eq('tournament_id', activeTournament.id)
+      .in('status', ['approved','booking','pending_fast'])
+      .order('registered_at_us', {ascending: true});
+
+    const myPos = (allBks||[]).findIndex(b => b.id === newBk.id);
+    const myRank = myPos + 1; // 1-based
+
+    // Simpan info booking sementara untuk QRIS
+    _qrisBookingData = {
+      team,
+      players: [],
+      tournament: activeTournament,
+      bookingId: newBk.id,
+      myRank,
+      totalSlots
+    };
+
+    // Buka QRIS langsung atau simpan manual
+    if(_payMode === 'manual'){
+      // Manual: perlu upload bukti transfer
+      const proofFile = document.getElementById('book-proof')?.files[0];
+      if(!proofFile){ 
+        // Expire the booking we just created
+        await sb.from('bookings').update({status:'expired'}).eq('id', newBk.id);
+        setErr('book-err','Upload bukti transfer wajib untuk mode manual.'); 
+        return; 
+      }
+      if(proofFile.size > 2*1024*1024){ 
+        await sb.from('bookings').update({status:'expired'}).eq('id', newBk.id);
+        setErr('book-err','Bukti max 2MB.'); 
+        return; 
+      }
+      const blob2 = await compressImage(proofFile, 1024, 0.8);
+      const path2 = `proof/${currentUser.id}-${Date.now()}.webp`;
+      const {error: upErr2} = await sb.storage.from('site-assets').upload(path2, blob2, { contentType:'image/webp', upsert:false });
+      if(upErr2) throw upErr2;
+      const {data: pub2} = sb.storage.from('site-assets').getPublicUrl(path2);
+      await sb.from('bookings').update({ payment_proof: pub2.publicUrl, status:'pending' }).eq('id', newBk.id);
+      toast(`📤 Booking terkirim! Posisi #${myRank}. Menunggu konfirmasi admin.`);
+      gotoPage('mybook'); loadMyBookings();
+    } else {
+      // QRIS: buka modal
+      openQrisModal(activeTournament, newBk.id, myRank, totalSlots);
+    }
+
   }catch(e){
     console.error(e); setErr('book-err', e.message||String(e));
   }finally{ setLoading(btn,false); }
@@ -909,19 +1015,24 @@ async function submitBooking(){
 async function loadMyBookings(){
   const el=$('list-mybook'); el.innerHTML='<div class="muted">Memuat...</div>';
   try{
-    const {data,error}=await sb.from('bookings').select('*, tournaments(name,tdate,ttime,mode)').eq('user_id', currentUser.id).order('created_at',{ascending:false});
+    const {data,error}=await sb.from('bookings').select('*, tournaments(name,tdate,ttime,mode,wa_link)').eq('user_id', currentUser.id).order('created_at',{ascending:false});
     if(error) throw error;
     if(!data?.length){ el.innerHTML='<div class="muted">Belum ada booking.</div>'; return; }
     el.innerHTML = data.map(b=>{
       const t = b.tournaments||{};
-      const tag = b.status==='approved'?'<span class="tag tag-green">APPROVED</span>':
-                  b.status==='rejected'?'<span class="tag tag-red">REJECTED</span>':
-                  '<span class="tag tag-orange">PENDING</span>';
+      let tag, statusLabel;
+      if(b.status==='approved'){ tag='<span class="tag tag-green">APPROVED ✅</span>'; statusLabel='approved'; }
+      else if(b.status==='rejected'){ tag='<span class="tag tag-red">REJECTED ❌</span>'; statusLabel='rejected'; }
+      else if(b.status==='expired'){ tag='<span class="tag tag-muted">EXPIRED ⏰</span>'; statusLabel='expired'; }
+      else if(b.status==='booking'){ tag='<span class="tag tag-blue">MENUNGGU BAYAR 💳</span>'; statusLabel='booking'; }
+      else { tag='<span class="tag tag-orange">PENDING</span>'; statusLabel='pending'; }
+      const waLink = b.status==='approved' && t.wa_link ? 
+        `<a href="${escapeHtml(t.wa_link)}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;margin-top:10px;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;padding:9px 16px;border-radius:9px;font-family:var(--font);font-weight:800;font-size:13px;text-decoration:none;">📲 GABUNG GRUP WA TURNAMEN</a>` : '';
       return `<div class="t-item">
         <div class="row-between"><div class="t-title">${escapeHtml(t.name||'-')}</div>${tag}</div>
         <div class="t-meta">Tim: <strong style="color:var(--text);">${escapeHtml(b.team_name)}</strong></div>
         <div class="t-meta">${t.tdate||''} ${t.ttime||''} · ${t.mode||''}</div>
-        <div class="t-meta">Players: ${(b.players||[]).map(escapeHtml).join(', ')}</div>
+        ${waLink}
       </div>`;
     }).join('');
   }catch(e){ el.innerHTML='<div class="err-box">'+(e.message||e)+'</div>'; }
@@ -945,7 +1056,7 @@ function adminTab(name){
 
 function resetTournamentForm(){
   $('t-form-title').textContent='TAMBAH TURNAMEN';
-  ['t-id','t-name','t-prize'].forEach(i=>$(i).value='');
+  ['t-id','t-name','t-prize','t-walink'].forEach(i=>$(i).value='');
   $('t-date').value=''; $('t-time').value='';
   $('t-mode').value='SQUAD'; $('t-slots').value='12';
   $('t-price').value='10000'; $('t-status').value='open';
@@ -961,7 +1072,8 @@ async function saveTournament(){
     prize:$('t-prize').value.trim(),
     slots:parseInt($('t-slots').value)||0,
     price:parseInt($('t-price').value)||0,
-    status:$('t-status').value
+    status:$('t-status').value,
+    wa_link:$('t-walink').value.trim()||null
   };
   if(!row.name) return toast('Nama wajib','err');
   try{
@@ -989,6 +1101,7 @@ async function loadAdminTournaments(){
         <span class="tag ${t.status==='open'?'tag-green':'tag-red'}">${t.status.toUpperCase()}</span></div>
       <div class="t-meta">${t.tdate||'-'} ${t.ttime||''} · ${t.mode} · ${t.slots} slot · ${fmtRp(t.price)}</div>
       <div class="t-meta">🏆 ${escapeHtml(t.prize||'-')}</div>
+      ${t.wa_link ? `<div class="t-meta">🔗 <a href="${escapeHtml(t.wa_link)}" target="_blank" style="color:var(--blue);">${escapeHtml(t.wa_link)}</a></div>` : ''}
       <div style="margin-top:10px;display:flex;gap:6px;">
         <button class="btn btn-ghost btn-sm" onclick='editTournament(${JSON.stringify(t).replace(/'/g,"&apos;")})'>Edit</button>
         <button class="btn btn-red btn-sm" onclick="delTournament('${t.id}')">Hapus</button>
@@ -1002,7 +1115,7 @@ function editTournament(t){
   $('t-date').value=t.tdate||''; $('t-time').value=t.ttime||'';
   $('t-mode').value=t.mode||'SQUAD'; $('t-slots').value=t.slots||12;
   $('t-price').value=t.price||0; $('t-status').value=t.status||'open';
-  $('t-prize').value=t.prize||'';
+  $('t-prize').value=t.prize||''; $('t-walink').value=t.wa_link||'';
   window.scrollTo({top:0, behavior:'smooth'});
 }
 async function delTournament(id){
@@ -1105,7 +1218,8 @@ Object.assign(window, {
   backToAuthStep1, resendOtp, doLogout, gotoPage, openBooking, submitBooking,
   loadTournaments, loadMyBookings, adminTab, saveTournament, resetTournamentForm,
   loadAdminTournaments, editTournament, delTournament, loadAdminBookings,
-  setBookingStatus, loadAdminUsers, toggleBan, toggleAdmin, uploadLogo, saveSiteContent
+  setBookingStatus, loadAdminUsers, toggleBan, toggleAdmin, uploadLogo, saveSiteContent,
+  closeQrisModal, selectPayMode
 });
 
 /* ════════════════════════ QRIS PAYMENT ════════════════════════ */
@@ -1140,29 +1254,25 @@ function selectPayMode(mode){
   }
 }
 
-// Override submitBooking untuk handle dua mode
-const _origSubmitBooking = window.submitBooking;
-window.submitBooking = async function(){
-  if(_payMode === 'manual'){
-    return _origSubmitBooking();
-  }
-  // Mode QRIS
-  setErr('book-err','');
-  if(!activeTournament) return;
-  const team = document.getElementById('book-team')?.value.trim();
-  const players = [...document.querySelectorAll('.book-player')].map(i=>i.value.trim());
-  if(!team) return setErr('book-err','Nama tim wajib.');
-  if(players.some(p=>!p)) return setErr('book-err','Semua slot player wajib diisi.');
+// submitBooking sudah di-override di atas dengan sistem slot priority
 
-  // Simpan data booking untuk dipakai setelah bayar
-  _qrisBookingData = { team, players, tournament: activeTournament };
-
-  // Buka modal QRIS dan buat transaksi
-  openQrisModal(activeTournament);
-};
-
-async function openQrisModal(tournament){
+async function openQrisModal(tournament, bookingId, myRank, totalSlots){
   const amount = tournament.price || 10000;
+  // Tampilkan info posisi slot di modal
+  const rankInfo = document.getElementById('qris-rank-info');
+  if(rankInfo){
+    if(myRank && myRank <= totalSlots){
+      rankInfo.innerHTML = `<div style="text-align:center;padding:8px;background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);border-radius:8px;color:var(--green);font-size:13px;font-weight:700;margin-bottom:10px;">
+        🏆 Kamu di posisi #${myRank} dari ${totalSlots} slot — <strong>Slot terkonfirmasi!</strong><br>
+        <span style="font-size:11px;font-weight:400;color:var(--muted);">Bayar sebelum timer habis atau slot kembali tersedia untuk orang lain.</span>
+      </div>`;
+    } else if(myRank){
+      rankInfo.innerHTML = `<div style="text-align:center;padding:8px;background:rgba(255,107,0,.1);border:1px solid rgba(255,107,0,.3);border-radius:8px;color:var(--accent);font-size:13px;font-weight:700;margin-bottom:10px;">
+        ⏳ Kamu di posisi #${myRank} — Sedang menunggu slot dari yang belum bayar.<br>
+        <span style="font-size:11px;font-weight:400;color:var(--muted);">Jika ada yang timeout, slot akan otomatis jatuh ke kamu.</span>
+      </div>`;
+    }
+  }
   const overlay = document.getElementById('qris-overlay');
   const loading = document.getElementById('qris-loading');
   const imgWrap = document.getElementById('qris-img-wrap');
@@ -1209,10 +1319,17 @@ async function openQrisModal(tournament){
   }
 }
 
-function closeQrisModal(){
+async function closeQrisModal(expired=false){
   const overlay = document.getElementById('qris-overlay');
   if(overlay) overlay.style.display = 'none';
   clearQrisTimers();
+  // Kalau ditutup/timeout sebelum bayar → set booking jadi expired agar slot bebas
+  if(expired && _qrisBookingData?.bookingId){
+    try{
+      await sb.from('bookings').update({status:'expired'}).eq('id', _qrisBookingData.bookingId);
+      toast('⏰ Waktu bayar habis. Slot dikembalikan ke antrian.', 'err');
+    }catch(e){ console.warn('expire booking err', e); }
+  }
   _qrisOrderId = null;
   _qrisTrxId = null;
   _qrisBookingData = null;
@@ -1236,7 +1353,7 @@ function startQrisTimer(sec){
     if(s <= 0){
       clearInterval(_qrisTimerId);
       clearInterval(_qrisPollId);
-      setErr('qris-modal-err','Waktu habis. Silakan coba lagi.');
+      closeQrisModal(true); // expired
     }
   }, 1000);
 }
@@ -1265,25 +1382,40 @@ async function onQrisPaid(){
   const sw = document.getElementById('qris-status-wrap');
   if(sw) sw.style.display = 'block';
 
-  // Simpan booking ke Supabase dengan status approved langsung
   if(!_qrisBookingData) return;
-  const { team, players, tournament } = _qrisBookingData;
+  const { bookingId, tournament, myRank, totalSlots } = _qrisBookingData;
   try{
-    const { error } = await sb.from('bookings').insert({
-      user_id: currentUser.id,
-      tournament_id: tournament.id,
-      team_name: team,
-      players,
+    // Update booking yang sudah ada (bukan insert baru)
+    const { error } = await sb.from('bookings').update({
       payment_proof: 'QRIS:'+(_qrisOrderId||'auto'),
-      status: 'approved'  // QRIS sudah verified, langsung approved
-    });
+      status: 'approved'
+    }).eq('id', bookingId);
     if(error) throw error;
+
+    // Ambil wa_link dari tournament
+    const { data: tData } = await sb.from('tournaments').select('wa_link').eq('id', tournament.id).single();
+    const waLink = tData?.wa_link || null;
+
+    // Tampilkan link WA jika ada
+    const paidMsg = document.getElementById('qris-paid-msg');
+    if(paidMsg){
+      let msgHtml = `<div style="font-size:16px;margin-bottom:6px;">✅ Pembayaran berhasil!</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Booking dikonfirmasi — kamu masuk slot #${myRank||'?'}</div>`;
+      if(waLink){
+        msgHtml += `<a href="${escapeHtml(waLink)}" target="_blank" 
+          style="display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;padding:10px 18px;border-radius:10px;font-family:var(--font);font-weight:800;font-size:14px;text-decoration:none;margin-top:4px;">
+          📲 GABUNG GRUP WA TURNAMEN
+        </a>`;
+      }
+      paidMsg.innerHTML = msgHtml;
+    }
+
     setTimeout(() => {
-      closeQrisModal();
-      toast('✅ Booking berhasil! Pembayaran QRIS terkonfirmasi.');
+      closeQrisModal(); // bukan expired, jadi tidak trigger expire
+      toast('✅ Booking berhasil! Cek Booking Saya.');
       gotoPage('mybook');
       loadMyBookings();
-    }, 2000);
+    }, waLink ? 8000 : 2500); // kasih waktu lebih lama kalau ada link WA
   } catch(e){
     setErr('qris-modal-err', 'Booking gagal disimpan: '+(e.message||String(e)));
   }
@@ -1292,13 +1424,15 @@ async function onQrisPaid(){
 </script>
 
 <!-- ══════════════ QRIS MODAL ══════════════ -->
-<div id="qris-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px;" onclick="if(event.target===this) closeQrisModal()">
+<div id="qris-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9000;align-items:center;justify-content:center;padding:16px;" onclick="if(event.target===this) closeQrisModal(true)">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:16px;width:100%;max-width:380px;overflow:hidden;">
     <div style="background:linear-gradient(135deg,var(--accent),var(--accent2));padding:14px 18px;display:flex;align-items:center;justify-content:space-between;">
       <div style="font-family:var(--font);font-weight:900;font-size:15px;color:#fff;">💳 BAYAR QRIS</div>
-      <button onclick="closeQrisModal()" style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:0 4px;">×</button>
+      <button onclick="closeQrisModal(true)" style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:0 4px;">×</button>
     </div>
     <div style="padding:18px;">
+      <!-- Rank/slot info -->
+      <div id="qris-rank-info"></div>
       <!-- Timer -->
       <div style="text-align:center;margin-bottom:14px;">
         <div style="font-size:11px;color:var(--muted);font-family:var(--font);letter-spacing:1px;">SISA WAKTU</div>
