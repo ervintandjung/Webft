@@ -343,14 +343,35 @@ a{color:inherit;text-decoration:none;}
         </div>
         <div id="book-players"></div>
 
+        <!-- Pilih metode pembayaran -->
         <div class="field" style="margin-bottom:12px;">
+          <label class="label">Metode Pembayaran</label>
+          <div style="display:flex;gap:8px;margin-top:6px;">
+            <button id="pay-btn-qris" onclick="selectPayMode('qris')"
+              style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--accent);background:rgba(255,107,0,.15);color:var(--accent);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
+              💳 QRIS OTOMATIS
+            </button>
+            <button id="pay-btn-manual" onclick="selectPayMode('manual')"
+              style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--border2);background:transparent;color:var(--muted);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
+              📤 TRANSFER MANUAL
+            </button>
+          </div>
+        </div>
+
+        <!-- QRIS Modal trigger info -->
+        <div id="pay-qris-info" style="padding:10px 14px;background:rgba(255,107,0,.08);border:1px solid rgba(255,107,0,.3);border-radius:9px;margin-bottom:12px;font-size:13px;color:var(--accent2);">
+          ⚡ Bayar langsung dengan QRIS — GoPay, OVO, Dana, dll. Konfirmasi otomatis.
+        </div>
+
+        <!-- Upload bukti (manual) -->
+        <div id="pay-manual-section" style="display:none;margin-bottom:12px;">
           <label class="label">Upload Bukti Transfer (max 2MB)</label>
-          <input class="input" id="book-proof" type="file" accept="image/*"/>
+          <input class="input" id="book-proof" type="file" accept="image/*" style="margin-top:6px;"/>
           <div class="muted small" style="margin-top:6px;" id="book-proof-info"></div>
         </div>
 
         <div id="book-err" class="err-box" style="display:none;"></div>
-        <button class="btn btn-orange btn-full" id="book-submit-btn" onclick="submitBooking()">KIRIM BOOKING</button>
+        <button class="btn btn-orange btn-full" id="book-submit-btn" onclick="submitBooking()">💳 BAYAR & DAFTAR</button>
       </div>
     </div>
 
@@ -1086,6 +1107,229 @@ Object.assign(window, {
   loadAdminTournaments, editTournament, delTournament, loadAdminBookings,
   setBookingStatus, loadAdminUsers, toggleBan, toggleAdmin, uploadLogo, saveSiteContent
 });
+
+/* ════════════════════════ QRIS PAYMENT ════════════════════════ */
+const WORKER_URL = 'https://qris-gateway.vinzprostore.workers.dev';
+let _payMode = 'qris'; // 'qris' atau 'manual'
+let _qrisOrderId = null;
+let _qrisTrxId = null;
+let _qrisTimerId = null;
+let _qrisPollId = null;
+let _qrisBookingData = null; // simpan data booking sementara
+
+function selectPayMode(mode){
+  _payMode = mode;
+  const qBtn = document.getElementById('pay-btn-qris');
+  const mBtn = document.getElementById('pay-btn-manual');
+  const qInfo = document.getElementById('pay-qris-info');
+  const mSec  = document.getElementById('pay-manual-section');
+  if(mode === 'qris'){
+    if(qBtn){ qBtn.style.borderColor='var(--accent)'; qBtn.style.background='rgba(255,107,0,.15)'; qBtn.style.color='var(--accent)'; }
+    if(mBtn){ mBtn.style.borderColor='var(--border2)'; mBtn.style.background='transparent'; mBtn.style.color='var(--muted)'; }
+    if(qInfo) qInfo.style.display='';
+    if(mSec)  mSec.style.display='none';
+    const btn = document.getElementById('book-submit-btn');
+    if(btn) btn.textContent = '💳 BAYAR & DAFTAR';
+  } else {
+    if(mBtn){ mBtn.style.borderColor='var(--accent)'; mBtn.style.background='rgba(255,107,0,.15)'; mBtn.style.color='var(--accent)'; }
+    if(qBtn){ qBtn.style.borderColor='var(--border2)'; qBtn.style.background='transparent'; qBtn.style.color='var(--muted)'; }
+    if(qInfo) qInfo.style.display='none';
+    if(mSec)  mSec.style.display='';
+    const btn = document.getElementById('book-submit-btn');
+    if(btn) btn.textContent = '📤 KIRIM BOOKING';
+  }
+}
+
+// Override submitBooking untuk handle dua mode
+const _origSubmitBooking = window.submitBooking;
+window.submitBooking = async function(){
+  if(_payMode === 'manual'){
+    return _origSubmitBooking();
+  }
+  // Mode QRIS
+  setErr('book-err','');
+  if(!activeTournament) return;
+  const team = document.getElementById('book-team')?.value.trim();
+  const players = [...document.querySelectorAll('.book-player')].map(i=>i.value.trim());
+  if(!team) return setErr('book-err','Nama tim wajib.');
+  if(players.some(p=>!p)) return setErr('book-err','Semua slot player wajib diisi.');
+
+  // Simpan data booking untuk dipakai setelah bayar
+  _qrisBookingData = { team, players, tournament: activeTournament };
+
+  // Buka modal QRIS dan buat transaksi
+  openQrisModal(activeTournament);
+};
+
+async function openQrisModal(tournament){
+  const amount = tournament.price || 10000;
+  const overlay = document.getElementById('qris-overlay');
+  const loading = document.getElementById('qris-loading');
+  const imgWrap = document.getElementById('qris-img-wrap');
+  const statusWrap = document.getElementById('qris-status-wrap');
+
+  if(!overlay) return;
+  overlay.style.display = 'flex';
+  if(loading) loading.style.display = 'block';
+  if(imgWrap) imgWrap.style.display = 'none';
+  if(statusWrap) statusWrap.style.display = 'none';
+  setErr('qris-modal-err','');
+  document.getElementById('qris-tname').textContent = tournament.name || '-';
+  document.getElementById('qris-amount').textContent = 'Rp ' + Number(amount).toLocaleString('id-ID');
+  startQrisTimer(600);
+
+  try{
+    // Ambil Supabase Auth session
+    const { data: { session } } = await sb.auth.getSession();
+    if(!session) throw new Error('Login dulu!');
+
+    const res = await fetch(WORKER_URL + '/create-qris', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'Authorization':'Bearer '+session.access_token },
+      body: JSON.stringify({
+        amount,
+        product_id: String(tournament.id),
+        customer_name: currentUser?.user_metadata?.name || currentUser?.email || 'Customer',
+      })
+    });
+    const d = await res.json();
+    if(!res.ok) throw new Error(d.error || 'Gagal buat QRIS');
+
+    _qrisOrderId = d.order_id;
+    _qrisTrxId   = d.transaction_id;
+
+    if(loading) loading.style.display = 'none';
+    if(imgWrap) imgWrap.style.display = 'block';
+    document.getElementById('qris-img').src = d.qris_url;
+
+    startQrisPoll();
+  } catch(e){
+    if(loading) loading.style.display = 'none';
+    setErr('qris-modal-err', e.message || String(e));
+  }
+}
+
+function closeQrisModal(){
+  const overlay = document.getElementById('qris-overlay');
+  if(overlay) overlay.style.display = 'none';
+  clearQrisTimers();
+  _qrisOrderId = null;
+  _qrisTrxId = null;
+  _qrisBookingData = null;
+}
+
+function clearQrisTimers(){
+  if(_qrisTimerId){ clearInterval(_qrisTimerId); _qrisTimerId = null; }
+  if(_qrisPollId){ clearInterval(_qrisPollId); _qrisPollId = null; }
+}
+
+function startQrisTimer(sec){
+  let s = sec;
+  const el = document.getElementById('qris-timer');
+  if(_qrisTimerId) clearInterval(_qrisTimerId);
+  _qrisTimerId = setInterval(() => {
+    s--;
+    const m = String(Math.floor(s/60)).padStart(2,'0');
+    const ss= String(s%60).padStart(2,'0');
+    if(el) el.textContent = m+':'+ss;
+    if(el) el.style.color = s <= 60 ? 'var(--red)' : 'var(--accent)';
+    if(s <= 0){
+      clearInterval(_qrisTimerId);
+      clearInterval(_qrisPollId);
+      setErr('qris-modal-err','Waktu habis. Silakan coba lagi.');
+    }
+  }, 1000);
+}
+
+function startQrisPoll(){
+  if(_qrisPollId) clearInterval(_qrisPollId);
+  _qrisPollId = setInterval(async () => {
+    if(!_qrisTrxId) return;
+    try{
+      const r = await fetch(WORKER_URL + '/check-qris?transaction_id='+encodeURIComponent(_qrisTrxId));
+      const d = await r.json();
+      const st = String(d.status || d.payment_status || '').toLowerCase();
+      if(st === 'paid' || st === 'success' || st === 'settlement'){
+        clearQrisTimers();
+        onQrisPaid();
+      } else if(st === 'expired' || st === 'failed'){
+        clearQrisTimers();
+        setErr('qris-modal-err','Pembayaran '+st+'. Silakan coba lagi.');
+      }
+    } catch(_){}
+  }, 4000);
+}
+
+async function onQrisPaid(){
+  // Tampilkan pesan sukses di modal
+  const sw = document.getElementById('qris-status-wrap');
+  if(sw) sw.style.display = 'block';
+
+  // Simpan booking ke Supabase dengan status approved langsung
+  if(!_qrisBookingData) return;
+  const { team, players, tournament } = _qrisBookingData;
+  try{
+    const { error } = await sb.from('bookings').insert({
+      user_id: currentUser.id,
+      tournament_id: tournament.id,
+      team_name: team,
+      players,
+      payment_proof: 'QRIS:'+(_qrisOrderId||'auto'),
+      status: 'approved'  // QRIS sudah verified, langsung approved
+    });
+    if(error) throw error;
+    setTimeout(() => {
+      closeQrisModal();
+      toast('✅ Booking berhasil! Pembayaran QRIS terkonfirmasi.');
+      gotoPage('mybook');
+      loadMyBookings();
+    }, 2000);
+  } catch(e){
+    setErr('qris-modal-err', 'Booking gagal disimpan: '+(e.message||String(e)));
+  }
+}
+
 </script>
+
+<!-- ══════════════ QRIS MODAL ══════════════ -->
+<div id="qris-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px;" onclick="if(event.target===this) closeQrisModal()">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:16px;width:100%;max-width:380px;overflow:hidden;">
+    <div style="background:linear-gradient(135deg,var(--accent),var(--accent2));padding:14px 18px;display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-family:var(--font);font-weight:900;font-size:15px;color:#fff;">💳 BAYAR QRIS</div>
+      <button onclick="closeQrisModal()" style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:0 4px;">×</button>
+    </div>
+    <div style="padding:18px;">
+      <!-- Timer -->
+      <div style="text-align:center;margin-bottom:14px;">
+        <div style="font-size:11px;color:var(--muted);font-family:var(--font);letter-spacing:1px;">SISA WAKTU</div>
+        <div id="qris-timer" style="font-family:var(--font);font-size:32px;font-weight:900;color:var(--accent);letter-spacing:2px;">10:00</div>
+      </div>
+      <!-- QR Image -->
+      <div id="qris-loading" style="text-align:center;padding:20px;"><span class="spinner"></span><div style="margin-top:8px;color:var(--muted);font-size:13px;">Membuat QRIS...</div></div>
+      <div id="qris-img-wrap" style="display:none;text-align:center;">
+        <img id="qris-img" src="" alt="QRIS" style="width:220px;height:220px;border-radius:12px;border:2px solid var(--border2);"/>
+        <div style="font-size:12px;color:var(--muted);margin-top:8px;">Scan dengan GoPay, OVO, Dana, dll</div>
+      </div>
+      <!-- Info -->
+      <div style="margin-top:14px;padding:10px 12px;background:var(--bg3);border-radius:9px;font-size:13px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+          <span style="color:var(--muted);">Turnamen</span>
+          <span id="qris-tname" style="font-weight:700;max-width:200px;text-align:right;"></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+          <span style="color:var(--muted);">Total</span>
+          <span id="qris-amount" style="font-weight:900;color:var(--accent);font-family:var(--font);"></span>
+        </div>
+      </div>
+      <!-- Status -->
+      <div id="qris-status-wrap" style="margin-top:12px;text-align:center;display:none;">
+        <div id="qris-paid-msg" style="padding:14px;background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);border-radius:10px;color:var(--green);font-weight:700;font-size:14px;">
+          ✅ Pembayaran berhasil! Booking dikonfirmasi.
+        </div>
+      </div>
+      <div id="qris-modal-err" class="err-box" style="display:none;margin-top:10px;"></div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
