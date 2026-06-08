@@ -64,12 +64,10 @@
     price int default 0,
     status text default 'open',
     wa_link text,
-    pay_in_wa boolean default false,
     created_at timestamptz default now()
   );
   -- Jalankan ini jika tabel tournaments sudah ada sebelumnya:
   -- alter table public.tournaments add column if not exists wa_link text;
-  -- alter table public.tournaments add column if not exists pay_in_wa boolean default false;
   alter table public.tournaments enable row level security;
   create policy "tournaments_select_all" on public.tournaments for select using (true);
   create policy "tournaments_admin_write" on public.tournaments for all
@@ -347,42 +345,19 @@ a{color:inherit;text-decoration:none;}
         <div class="muted small" id="book-tmeta" style="margin-bottom:10px;"></div>
         <div id="book-slot-info" style="margin-bottom:12px;"></div>
 
-        <div class="field" style="margin-bottom:12px;">
+        <!-- Field Nama Tim (dinamis, bisa disembunyikan) -->
+        <div id="book-team-field" style="margin-bottom:12px;">
           <label class="label">Nama Tim</label>
           <input class="input" id="book-team" placeholder="Contoh: BLACK SQUAD"/>
         </div>
-        <!-- player fields dihapus, daftar langsung tanpa isi ID -->
         <div id="book-players" style="display:none;"></div>
 
-        <!-- Pilih metode pembayaran -->
-        <div class="field" id="book-pay-methods" style="margin-bottom:12px;">
-          <label class="label">Metode Pembayaran</label>
-          <div style="display:flex;gap:8px;margin-top:6px;">
-            <button id="pay-btn-qris" onclick="selectPayMode('qris')"
-              style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--accent);background:rgba(255,107,0,.15);color:var(--accent);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
-              💳 QRIS OTOMATIS
-            </button>
-            <button id="pay-btn-manual" onclick="selectPayMode('manual')"
-              style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--border2);background:transparent;color:var(--muted);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
-              📤 TRANSFER MANUAL
-            </button>
-          </div>
-        </div>
-
-        <!-- QRIS Modal trigger info -->
+        <!-- Info metode pembayaran (dinamis sesuai turnamen) -->
         <div id="pay-qris-info" style="padding:10px 14px;background:rgba(255,107,0,.08);border:1px solid rgba(255,107,0,.3);border-radius:9px;margin-bottom:12px;font-size:13px;color:var(--accent2);">
           ⚡ Bayar langsung dengan QRIS — GoPay, OVO, Dana, dll. Konfirmasi otomatis.
         </div>
-        <!-- Info bayar di WA -->
         <div id="pay-wa-info" style="display:none;padding:10px 14px;background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:9px;margin-bottom:12px;font-size:13px;color:#25d366;">
-          📲 Klik tombol di bawah untuk masuk grup WA. Admin akan kirim QRIS pembayaran di dalam grup.
-        </div>
-
-        <!-- Upload bukti (manual) -->
-        <div id="pay-manual-section" style="display:none;margin-bottom:12px;">
-          <label class="label">Upload Bukti Transfer (max 2MB)</label>
-          <input class="input" id="book-proof" type="file" accept="image/*" style="margin-top:6px;"/>
-          <div class="muted small" style="margin-top:6px;" id="book-proof-info"></div>
+          📲 Setelah daftar, kamu akan masuk Grup WA. Admin kirim QRIS di dalam grup.
         </div>
 
         <div id="book-err" class="err-box" style="display:none;"></div>
@@ -434,14 +409,35 @@ a{color:inherit;text-decoration:none;}
           <div class="field" style="margin-bottom:10px;"><label class="label">🔗 Link Grup WA (dikirim otomatis setelah bayar)</label>
             <input class="input" id="t-walink" placeholder="https://chat.whatsapp.com/xxxxx"/>
           </div>
+          <!-- Toggle: Metode Pembayaran -->
+          <div class="field" style="margin-bottom:10px;">
+            <label class="label">💳 Metode Pembayaran</label>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button id="t-pay-qris-btn" onclick="selectTournamentPayMode('qris')"
+                style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--accent);background:rgba(255,107,0,.15);color:var(--accent);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
+                💳 QRIS
+              </button>
+              <button id="t-pay-wa-btn" onclick="selectTournamentPayMode('wa')"
+                style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--border2);background:transparent;color:var(--muted);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
+                📲 BAYAR DI WA
+              </button>
+            </div>
+            <input type="hidden" id="t-paymode" value="qris"/>
+          </div>
+          <!-- Toggle: Nama Tim -->
           <div class="field" style="margin-bottom:14px;">
-            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 14px;background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.25);border-radius:9px;">
-              <input type="checkbox" id="t-payinwa" style="width:18px;height:18px;accent-color:#25d366;cursor:pointer;"/>
-              <div>
-                <div style="font-family:var(--font);font-weight:800;font-size:14px;color:#25d366;">📲 BAYAR DI GRUP WA</div>
-                <div style="font-size:11px;color:var(--muted);margin-top:2px;">User langsung masuk grup WA, kamu kirim QRIS manual di dalam grup</div>
-              </div>
-            </label>
+            <label class="label">🏷️ Input Nama Tim</label>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button id="t-team-yes-btn" onclick="selectTournamentTeamMode(true)"
+                style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--accent);background:rgba(255,107,0,.15);color:var(--accent);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
+                ✅ WAJIB ISI
+              </button>
+              <button id="t-team-no-btn" onclick="selectTournamentTeamMode(false)"
+                style="flex:1;padding:10px;border-radius:9px;border:2px solid var(--border2);background:transparent;color:var(--muted);font-family:var(--font);font-weight:800;font-size:13px;cursor:pointer;">
+                ⚡ LANGSUNG DAFTAR
+              </button>
+            </div>
+            <input type="hidden" id="t-teammode" value="true"/>
           </div>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-orange" onclick="saveTournament()">SIMPAN</button>
@@ -946,32 +942,29 @@ async function openBooking(t){
   $('book-tname').textContent = t.name;
   $('book-tmeta').textContent = `${t.tdate||''} ${t.ttime||''} · ${t.mode} · ${fmtRp(t.price)}`;
   $('book-team').value='';
-  $('book-proof').value=''; $('book-proof-info').textContent='';
   $('book-players').innerHTML = '';
   setErr('book-err','');
-  // info pembayaran
-  if(siteConfig.rekening?.info){
-    $('book-tmeta').innerHTML += `<div style="margin-top:8px;padding:8px;background:var(--bg3);border-radius:6px;white-space:pre-line;color:var(--text);">💳 ${escapeHtml(siteConfig.rekening.info)}</div>`;
-  }
-  // Sembunyikan/tampilkan metode pembayaran berdasarkan pay_in_wa
-  const payMethods = document.getElementById('book-pay-methods');
-  const payQrisInfo = document.getElementById('pay-qris-info');
-  const payWaInfo = document.getElementById('pay-wa-info');
+
+  // Toggle nama tim sesuai setting turnamen
+  const teamField = document.getElementById('book-team-field');
+  if(teamField) teamField.style.display = (t.require_team === false) ? 'none' : '';
+
+  // Toggle metode bayar sesuai setting turnamen
+  const qrisInfo = document.getElementById('pay-qris-info');
+  const waInfo   = document.getElementById('pay-wa-info');
+  const btn      = document.getElementById('book-submit-btn');
   if(t.pay_in_wa){
-    if(payMethods) payMethods.style.display='none';
-    if(payQrisInfo) payQrisInfo.style.display='none';
-    if(payWaInfo) payWaInfo.style.display='';
     _payMode = 'wa_group';
-    const btn = document.getElementById('book-submit-btn');
+    if(qrisInfo) qrisInfo.style.display='none';
+    if(waInfo)   waInfo.style.display='';
     if(btn) btn.innerHTML = '📲 DAFTAR & MASUK GRUP WA';
   } else {
-    if(payMethods) payMethods.style.display='';
-    if(payWaInfo) payWaInfo.style.display='none';
-    selectPayMode('qris');
-    const btn = document.getElementById('book-submit-btn');
+    _payMode = 'qris';
+    if(qrisInfo) qrisInfo.style.display='';
+    if(waInfo)   waInfo.style.display='none';
     if(btn) btn.innerHTML = '💳 BAYAR & DAFTAR';
   }
-  // Cek slot tersisa
+
   await checkAndShowSlotInfo(t);
   gotoPage('book');
 }
@@ -1001,8 +994,10 @@ async function checkAndShowSlotInfo(t){
 async function submitBooking(){
   setErr('book-err','');
   if(!activeTournament) return;
-  const team=$('book-team').value.trim();
-  if(!team) return setErr('book-err','Nama tim wajib.');
+  const requireTeam = activeTournament.require_team !== false;
+  const teamInput = ($('book-team').value||'').trim();
+  const team = requireTeam ? teamInput : (teamInput || '-');
+  if(requireTeam && !teamInput) return setErr('book-err','Nama tim wajib.');
 
   // Rekam timestamp microsecond saat tombol ditekan
   const registeredAtUs = getMicroTimestamp();
@@ -1062,42 +1057,15 @@ async function submitBooking(){
       totalSlots
     };
 
-    // Buka QRIS, redirect WA, atau simpan manual
+    // Buka QRIS atau redirect Grup WA sesuai setting turnamen
     if(_payMode === 'wa_group'){
-      // Mode Bayar di Grup WA: insert booking pending, langsung buka link WA
       await sb.from('bookings').update({ status:'pending' }).eq('id', newBk.id);
       const waLink = activeTournament.wa_link || null;
       toast(`📲 Berhasil daftar! Posisi #${myRank}. Masuk grup WA untuk bayar.`);
       if(waLink){
-        // Tampilkan popup link WA sebelum redirect
-        const goWa = confirm('✅ Pendaftaran berhasil!
-
-Klik OK untuk masuk Grup WA dan lakukan pembayaran di sana.');
+        const goWa = confirm('✅ Pendaftaran berhasil!\n\nKlik OK untuk masuk Grup WA. Admin akan kirim QRIS di sana.');
         if(goWa) window.open(waLink, '_blank');
       }
-      gotoPage('mybook'); loadMyBookings();
-      return;
-    } else if(_payMode === 'manual'){
-      // Manual: perlu upload bukti transfer
-      const proofFile = document.getElementById('book-proof')?.files[0];
-      if(!proofFile){ 
-        // Expire the booking we just created
-        await sb.from('bookings').update({status:'expired'}).eq('id', newBk.id);
-        setErr('book-err','Upload bukti transfer wajib untuk mode manual.'); 
-        return; 
-      }
-      if(proofFile.size > 2*1024*1024){ 
-        await sb.from('bookings').update({status:'expired'}).eq('id', newBk.id);
-        setErr('book-err','Bukti max 2MB.'); 
-        return; 
-      }
-      const blob2 = await compressImage(proofFile, 1024, 0.8);
-      const path2 = `proof/${currentUser.id}-${Date.now()}.webp`;
-      const {error: upErr2} = await sb.storage.from('site-assets').upload(path2, blob2, { contentType:'image/webp', upsert:false });
-      if(upErr2) throw upErr2;
-      const {data: pub2} = sb.storage.from('site-assets').getPublicUrl(path2);
-      await sb.from('bookings').update({ payment_proof: pub2.publicUrl, status:'pending' }).eq('id', newBk.id);
-      toast(`📤 Booking terkirim! Posisi #${myRank}. Menunggu konfirmasi admin.`);
       gotoPage('mybook'); loadMyBookings();
     } else {
       // QRIS: buka modal
@@ -1157,7 +1125,30 @@ function resetTournamentForm(){
   $('t-date').value=''; $('t-time').value='';
   $('t-mode').value='SQUAD'; $('t-slots').value='12';
   $('t-price').value='10000'; $('t-status').value='open';
-  const piw=$('t-payinwa'); if(piw) piw.checked=false;
+  selectTournamentPayMode('qris');
+  selectTournamentTeamMode(true);
+}
+function selectTournamentPayMode(mode){
+  $('t-paymode').value = mode;
+  const qBtn=$('t-pay-qris-btn'), wBtn=$('t-pay-wa-btn');
+  if(mode==='qris'){
+    if(qBtn){qBtn.style.borderColor='var(--accent)';qBtn.style.background='rgba(255,107,0,.15)';qBtn.style.color='var(--accent)';}
+    if(wBtn){wBtn.style.borderColor='var(--border2)';wBtn.style.background='transparent';wBtn.style.color='var(--muted)';}
+  } else {
+    if(wBtn){wBtn.style.borderColor='#25d366';wBtn.style.background='rgba(37,211,102,.15)';wBtn.style.color='#25d366';}
+    if(qBtn){qBtn.style.borderColor='var(--border2)';qBtn.style.background='transparent';qBtn.style.color='var(--muted)';}
+  }
+}
+function selectTournamentTeamMode(required){
+  $('t-teammode').value = required ? 'true' : 'false';
+  const yBtn=$('t-team-yes-btn'), nBtn=$('t-team-no-btn');
+  if(required){
+    if(yBtn){yBtn.style.borderColor='var(--accent)';yBtn.style.background='rgba(255,107,0,.15)';yBtn.style.color='var(--accent)';}
+    if(nBtn){nBtn.style.borderColor='var(--border2)';nBtn.style.background='transparent';nBtn.style.color='var(--muted)';}
+  } else {
+    if(nBtn){nBtn.style.borderColor='var(--accent2)';nBtn.style.background='rgba(255,179,0,.15)';nBtn.style.color='var(--accent2)';}
+    if(yBtn){yBtn.style.borderColor='var(--border2)';yBtn.style.background='transparent';yBtn.style.color='var(--muted)';}
+  }
 }
 
 async function saveTournament(){
@@ -1172,7 +1163,8 @@ async function saveTournament(){
     price:parseInt($('t-price').value)||0,
     status:$('t-status').value,
     wa_link:$('t-walink').value.trim()||null,
-    pay_in_wa: !!($('t-payinwa')&&$('t-payinwa').checked)
+    pay_in_wa: $('t-paymode').value === 'wa',
+    require_team: $('t-teammode').value !== 'false'
   };
   if(!row.name) return toast('Nama wajib','err');
   try{
@@ -1201,7 +1193,7 @@ async function loadAdminTournaments(){
       <div class="t-meta">${t.tdate||'-'} ${t.ttime||''} · ${t.mode} · ${t.slots} slot · ${fmtRp(t.price)}</div>
       <div class="t-meta">🏆 ${escapeHtml(t.prize||'-')}</div>
       ${t.wa_link ? `<div class="t-meta">🔗 <a href="${escapeHtml(t.wa_link)}" target="_blank" style="color:var(--blue);">${escapeHtml(t.wa_link)}</a></div>` : ''}
-      ${t.pay_in_wa ? '<div class="t-meta" style="color:#25d366;font-weight:700;">📲 Bayar di Grup WA aktif</div>' : ''}
+      <div class="t-meta" style="font-weight:700;color:${t.pay_in_wa?'#25d366':'var(--accent)'};">${t.pay_in_wa?'📲 Bayar di Grup WA':'💳 QRIS Otomatis'} · ${t.require_team===false?'⚡ Langsung Daftar':'🏷️ Wajib Nama Tim'}</div>
       <div style="margin-top:10px;display:flex;gap:6px;">
         <button class="btn btn-ghost btn-sm" onclick='editTournament(${JSON.stringify(t).replace(/'/g,"&apos;")})'>Edit</button>
         <button class="btn btn-red btn-sm" onclick="delTournament('${t.id}')">Hapus</button>
@@ -1216,7 +1208,8 @@ function editTournament(t){
   $('t-mode').value=t.mode||'SQUAD'; $('t-slots').value=t.slots||12;
   $('t-price').value=t.price||0; $('t-status').value=t.status||'open';
   $('t-prize').value=t.prize||''; $('t-walink').value=t.wa_link||'';
-  const piw=$('t-payinwa'); if(piw) piw.checked=!!t.pay_in_wa;
+  selectTournamentPayMode(t.pay_in_wa ? 'wa' : 'qris');
+  selectTournamentTeamMode(t.require_team !== false);
   window.scrollTo({top:0, behavior:'smooth'});
 }
 async function delTournament(id){
@@ -1335,7 +1328,7 @@ Object.assign(window, {
   loadTournaments, loadMyBookings, adminTab, saveTournament, resetTournamentForm,
   loadAdminTournaments, editTournament, delTournament, loadAdminBookings,
   setBookingStatus, loadAdminUsers, toggleBan, toggleAdmin, uploadLogo, saveSiteContent,
-  closeQrisModal, selectPayMode
+  closeQrisModal, selectPayMode, selectTournamentPayMode, selectTournamentTeamMode
 });
 
 /* ════════════════════════ QRIS PAYMENT ════════════════════════ */
@@ -1347,28 +1340,7 @@ let _qrisTimerId = null;
 let _qrisPollId = null;
 let _qrisBookingData = null; // simpan data booking sementara
 
-function selectPayMode(mode){
-  _payMode = mode;
-  const qBtn = document.getElementById('pay-btn-qris');
-  const mBtn = document.getElementById('pay-btn-manual');
-  const qInfo = document.getElementById('pay-qris-info');
-  const mSec  = document.getElementById('pay-manual-section');
-  if(mode === 'qris'){
-    if(qBtn){ qBtn.style.borderColor='var(--accent)'; qBtn.style.background='rgba(255,107,0,.15)'; qBtn.style.color='var(--accent)'; }
-    if(mBtn){ mBtn.style.borderColor='var(--border2)'; mBtn.style.background='transparent'; mBtn.style.color='var(--muted)'; }
-    if(qInfo) qInfo.style.display='';
-    if(mSec)  mSec.style.display='none';
-    const btn = document.getElementById('book-submit-btn');
-    if(btn) btn.textContent = '💳 BAYAR & DAFTAR';
-  } else {
-    if(mBtn){ mBtn.style.borderColor='var(--accent)'; mBtn.style.background='rgba(255,107,0,.15)'; mBtn.style.color='var(--accent)'; }
-    if(qBtn){ qBtn.style.borderColor='var(--border2)'; qBtn.style.background='transparent'; qBtn.style.color='var(--muted)'; }
-    if(qInfo) qInfo.style.display='none';
-    if(mSec)  mSec.style.display='';
-    const btn = document.getElementById('book-submit-btn');
-    if(btn) btn.textContent = '📤 KIRIM BOOKING';
-  }
-}
+function selectPayMode(mode){ _payMode = mode; }
 
 // submitBooking sudah di-override di atas dengan sistem slot priority
 
